@@ -1,0 +1,76 @@
+stages:
+  - build
+  - release
+
+variables:
+  BINARY_NAME: terraform-provider-sambadns
+
+# Build for multiple platforms
+build:
+  stage: build
+  image: golang:1.18
+  tags:
+    - docker
+  script:
+    - mkdir -p dist
+    # Linux AMD64
+    - GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=${CI_COMMIT_TAG:-dev}" -o dist/${BINARY_NAME}_linux_amd64
+    # Linux ARM64
+    - GOOS=linux GOARCH=arm64 go build -ldflags "-X main.version=${CI_COMMIT_TAG:-dev}" -o dist/${BINARY_NAME}_linux_arm64
+    # Darwin AMD64 (macOS Intel)
+    - GOOS=darwin GOARCH=amd64 go build -ldflags "-X main.version=${CI_COMMIT_TAG:-dev}" -o dist/${BINARY_NAME}_darwin_amd64
+    # Darwin ARM64 (macOS Apple Silicon)
+    - GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=${CI_COMMIT_TAG:-dev}" -o dist/${BINARY_NAME}_darwin_arm64
+    # Create checksums
+    - cd dist && sha256sum * > checksums.txt
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == "master"
+
+# Create release on tag push
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  tags:
+    - docker
+  needs:
+    - job: build
+      artifacts: true
+  script:
+    - echo "Creating release for ${CI_COMMIT_TAG}"
+  release:
+    tag_name: ${CI_COMMIT_TAG}
+    name: "Release ${CI_COMMIT_TAG}"
+    description: |
+      ## Terraform Provider for samba-tool DNS ${CI_COMMIT_TAG}
+
+      ### Installation
+
+      Download the appropriate binary for your platform and place it in:
+      - Linux/macOS: `~/.terraform.d/plugins/registry.terraform.io/local/sambadns/${CI_COMMIT_TAG#v}/[os]_[arch]/`
+
+      ### Checksums
+      See `checksums.txt` for SHA256 verification.
+    assets:
+      links:
+        - name: "${BINARY_NAME}_linux_amd64"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/dist/${BINARY_NAME}_linux_amd64?job=build"
+          filepath: "/binaries/${BINARY_NAME}_linux_amd64"
+        - name: "${BINARY_NAME}_linux_arm64"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/dist/${BINARY_NAME}_linux_arm64?job=build"
+          filepath: "/binaries/${BINARY_NAME}_linux_arm64"
+        - name: "${BINARY_NAME}_darwin_amd64"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/dist/${BINARY_NAME}_darwin_amd64?job=build"
+          filepath: "/binaries/${BINARY_NAME}_darwin_amd64"
+        - name: "${BINARY_NAME}_darwin_arm64"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/dist/${BINARY_NAME}_darwin_arm64?job=build"
+          filepath: "/binaries/${BINARY_NAME}_darwin_arm64"
+        - name: "checksums.txt"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/dist/checksums.txt?job=build"
+          filepath: "/binaries/checksums.txt"
+  rules:
+    - if: $CI_COMMIT_TAG
