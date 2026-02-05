@@ -24,10 +24,11 @@ samba-tool speaks **MS-DNSP RPC directly from Linux**—the same protocol PowerS
 | Approach | Protocol | Wildcards | Speed | Notes |
 |----------|----------|-----------|-------|-------|
 | portofportland/windns | WinRM/PowerShell | Yes | ~5 rec/min | Single connection serializes all operations |
+| techbuzz/windns | SSH/PowerShell | Yes | ~5 rec/min | Same serialization issue over SSH |
 | hashicorp/dns (RFC 2136) | DNS UPDATE | No | ~2400 rec/min | Windows blocks wildcards at protocol level |
 | Direct LDAP writes | LDAP | Yes | Unknown | Records created but DNS didn't serve them |
 | GSSAPI/GSS-TSIG | DNS UPDATE + Kerberos | No | Fast | Same wildcard limitation as RFC 2136 |
-| **samba-tool (this provider)** | MS-DNSP RPC | **Yes** | ~730 rec/min | Same protocol PowerShell uses |
+| **samba-tool (this provider)** | MS-DNSP RPC | **Yes** | ~730 rec/min | True parallelism, no bottleneck |
 
 ## Key Features
 
