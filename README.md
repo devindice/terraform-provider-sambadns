@@ -4,17 +4,32 @@
 [![Release](https://img.shields.io/github/v/release/devindice/terraform-provider-sambadns)](https://github.com/devindice/terraform-provider-sambadns/releases)
 [![License](https://img.shields.io/github/license/devindice/terraform-provider-sambadns)](LICENSE)
 
-A Terraform provider for managing Windows DNS records via **samba-tool** using the MS-DNSP RPC protocol. This provider enables infrastructure-as-code management of DNS records on Windows DNS servers from Linux hosts, including support for **wildcard records** that RFC 2136 (nsupdate) cannot handle.
+This Terraform provider allows you to manage DNS records on Windows DNS servers via **samba-tool** using the MS-DNSP RPC protocol. It supports A, AAAA, CNAME, TXT, MX, PTR, SRV, and NS records, including **wildcard records** that RFC 2136 cannot handle.
 
-## Why This Provider?
+## Prerequisites
 
-| Approach | Wildcard Support | Protocol | Platform |
-|----------|------------------|----------|----------|
-| nsupdate (RFC 2136) | No | DNS UPDATE | Any |
-| PowerShell | Yes | WinRM/WMI | Windows |
-| **samba-tool (this provider)** | **Yes** | MS-DNSP RPC | Linux |
+- **Terraform** >= 1.0
+- **samba-tool** installed (part of `samba-common-bin` on Debian/Ubuntu)
+- **Network access** to Windows DC (MS-DNSP RPC, typically port 135 + dynamic)
+- **AD credentials** with DNS management permissions
 
-### Key Features
+## Why use this provider?
+
+Existing Terraform providers for Windows DNS (like `portofportland/windns`) use WinRM/PowerShell, which serializes all operations through a single connection—limiting throughput to ~5 records/minute regardless of parallelism settings. With large DNS deployments, `terraform plan` can take hours.
+
+The `hashicorp/dns` provider using RFC 2136 is fast (~2400 rec/min), but Windows DNS **intentionally blocks wildcard record creation via RFC 2136** dynamic updates, regardless of authentication method. This is a Windows implementation limitation, not a permissions issue.
+
+samba-tool speaks **MS-DNSP RPC directly from Linux**—the same protocol PowerShell uses under the hood, but without the WinRM/SSH bottleneck. Each Terraform worker spawns its own samba-tool process, enabling true parallel execution (~730 rec/min with `-parallelism=10`). No SSH or WinRM needed.
+
+| Approach | Protocol | Wildcards | Speed | Notes |
+|----------|----------|-----------|-------|-------|
+| portofportland/windns | WinRM/PowerShell | Yes | ~5 rec/min | Single connection serializes all operations |
+| hashicorp/dns (RFC 2136) | DNS UPDATE | No | ~2400 rec/min | Windows blocks wildcards at protocol level |
+| Direct LDAP writes | LDAP | Yes | Unknown | Records created but DNS didn't serve them |
+| GSSAPI/GSS-TSIG | DNS UPDATE + Kerberos | No | Fast | Same wildcard limitation as RFC 2136 |
+| **samba-tool (this provider)** | MS-DNSP RPC | **Yes** | ~730 rec/min | Same protocol PowerShell uses |
+
+## Key Features
 
 - **Full CRUD support** for DNS records (A, AAAA, CNAME, TXT, MX, PTR, SRV, NS)
 - **Wildcard record support** (e.g., `*.myapp.example.com`)
@@ -22,64 +37,6 @@ A Terraform provider for managing Windows DNS records via **samba-tool** using t
 - **Data source** for reading existing records
 - **Parallel execution** - supports Terraform's `-parallelism` flag
 - **Value normalization** - handles IPv6 expansion, CNAME trailing dots automatically
-
----
-
-## Background & Motivation
-
-### The Problem
-
-Existing Terraform providers for Windows DNS (like `portofportland/windns`) use WinRM/PowerShell, which serializes all operations through a single connection. This limits throughput to **~5 records/minute** regardless of parallelism settings. With large DNS deployments, `terraform plan` can take hours.
-
-### Approaches Evaluated
-
-| Approach | Protocol | Wildcards | Speed | Why Not |
-|----------|----------|-----------|-------|---------|
-| portofportland/windns | WinRM/PowerShell | Yes | ~5 rec/min | Too slow - single connection serializes all ops |
-| hashicorp/dns (RFC 2136) | DNS UPDATE | No | ~2400 rec/min | **Windows blocks wildcards at protocol level** |
-| Direct LDAP writes | LDAP | Yes | Unknown | Complex binary encoding; records created but DNS didn't serve them |
-| GSSAPI/GSS-TSIG | DNS UPDATE + Kerberos | No | Fast | Same wildcard limitation as unsecured RFC 2136 |
-| **samba-tool (this provider)** | MS-DNSP RPC | **Yes** | ~730 rec/min | **Selected** - same protocol PowerShell uses |
-
-### Key Discovery: Windows Blocks RFC 2136 Wildcards
-
-Windows DNS **intentionally blocks wildcard record creation via RFC 2136** dynamic updates, regardless of authentication method:
-
-| Test | Result |
-|------|--------|
-| Non-wildcard via unsecured RFC 2136 | Works |
-| Wildcard via unsecured RFC 2136 | **REFUSED** |
-| Non-wildcard via GSSAPI (AD-integrated zone) | Works |
-| Wildcard via GSSAPI (AD-integrated zone) | **REFUSED** |
-
-This is a **Windows implementation limitation**, not a permissions or auth issue. References:
-- [NetSPI - Exploiting Active Directory-Integrated DNS](https://www.netspi.com/blog/technical-blog/network-pentesting/exploiting-adidns/)
-- [The Hacker Recipes - ADIDNS Poisoning](https://www.thehacker.recipes/ad/movement/mitm-and-coerced-authentications/adidns-spoofing)
-
-**Why PowerShell works:** The `Add-DnsServerResourceRecord` cmdlet uses MS-DNSP RPC (not DNS protocol) which doesn't have this restriction.
-
-### The Solution
-
-samba-tool speaks **MS-DNSP RPC directly from Linux** - the same protocol PowerShell uses under the hood. This provides:
-- Wildcard support (no protocol-level block)
-- Fast parallel execution (~730 rec/min with parallelism=10)
-- No SSH/WinRM needed - runs directly from Linux
-
-### Performance Comparison
-
-| Provider | Records/min | Time for 1000 records | Improvement |
-|----------|-------------|----------------------|-------------|
-| WinRM-based providers | ~5 | ~3.3 hours | baseline |
-| This provider | ~730 | ~82 seconds | **146x faster** |
-
----
-
-## Requirements
-
-- **Terraform** >= 1.0
-- **samba-tool** installed (part of `samba-common-bin` on Debian/Ubuntu)
-- **Network access** to Windows DC (MS-DNSP RPC, typically port 135 + dynamic)
-- **AD credentials** with DNS management permissions
 
 ---
 
@@ -339,24 +296,6 @@ The provider is idempotent - if a record already exists with the same value, no 
 ### Drift Detection
 
 The provider queries DNS on every plan to detect external changes. If records are modified outside Terraform, the next plan will show the required changes.
-
----
-
-## Failed Approaches (Historical Reference)
-
-These approaches were evaluated during development:
-
-### RFC 2136 (hashicorp/dns provider)
-- Non-wildcards work; wildcards REFUSED
-- Windows blocks `*` in RFC 2136 UPDATE requests at protocol level
-
-### Direct LDAP Writes
-- Records created in AD but DNS server didn't serve them
-- Binary `dnsRecord` attribute format differs from Windows internal format
-
-### GSSAPI Authentication
-- GSSAPI handshake succeeds, but wildcard UPDATE still REFUSED
-- Auth isn't the blocker; Windows intentionally blocks wildcards in RFC 2136
 
 ---
 
